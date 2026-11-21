@@ -202,6 +202,85 @@ class PolicyTest {
         assertNull(s.device(roommate))
     }
 
+    // ---------------------------------------------------------------- let someone in
+
+    @Test fun `open door pauses allowlist mode but keeps the blocklist`() {
+        val s = Policy.openDoor(state(Device(stranger, access = Access.BLOCKED)), now = t0)
+        val lists = Policy.desiredLists(s, t0 + 1)
+        assertFalse(lists.allowlistMode)
+        assertEquals(setOf(stranger), lists.blocked)
+        assertTrue(Policy.desiredLists(s, t0 + Policy.DOOR_WINDOW_MS).allowlistMode)
+    }
+
+    @Test fun `door cannot open while protection is off`() {
+        assertNull(Policy.openDoor(state(protection = false), t0).doorOpenUntil)
+    }
+
+    @Test fun `first new device through the open door becomes a guest and the door closes`() {
+        val s = Policy.openDoor(state(Device(laptop, access = Access.TRUSTED)), t0)
+        val out = Policy.admitWhileOpen(s, listOf(laptop, roommate, stranger), t0 + 1_000)
+        assertEquals(roommate, out.admitted)
+        assertEquals(Access.GUEST, out.state.device(roommate)!!.access)
+        assertNull(out.state.device(roommate)!!.guestUntil)
+        assertNull(out.state.device(stranger))
+        assertNull(out.state.doorOpenUntil)
+        assertTrue(Policy.desiredLists(out.state, t0 + 1_000).allowlistMode)
+    }
+
+    @Test fun `known undecided devices can come in through the door`() {
+        val s = Policy.openDoor(state(Device(roommate, access = Access.UNDECIDED, lastKnockAt = t0 - 10)), t0)
+        assertEquals(roommate, Policy.admitWhileOpen(s, listOf(roommate), t0 + 1).admitted)
+    }
+
+    @Test fun `only trusted devices connecting does not use up the door`() {
+        val s = Policy.openDoor(state(Device(laptop, access = Access.TRUSTED)), t0)
+        val out = Policy.admitWhileOpen(s, listOf(laptop), t0 + 1)
+        assertNull(out.admitted)
+        assertEquals(s, out.state)
+    }
+
+    @Test fun `nobody is admitted once the door has closed`() {
+        val s = Policy.openDoor(state(), t0)
+        val out = Policy.admitWhileOpen(s, listOf(roommate), t0 + Policy.DOOR_WINDOW_MS)
+        assertNull(out.admitted)
+    }
+
+    @Test fun `an unused door closes on expiry and is the next wake-up`() {
+        val s = Policy.openDoor(state(), t0)
+        assertEquals(t0 + Policy.DOOR_WINDOW_MS, Policy.nextExpiry(s, t0))
+        assertNull(Policy.expireGuests(s, t0 + Policy.DOOR_WINDOW_MS).doorOpenUntil)
+    }
+
+    @Test fun `hotspot off and protection off both close the door`() {
+        val s = Policy.openDoor(state(), t0)
+        assertNull(Policy.onHotspotStopped(s).doorOpenUntil)
+        assertNull(Policy.disableProtection(s).doorOpenUntil)
+    }
+
+    // ---------------------------------------------------------------- names
+
+    @Test fun `reported hostnames name known devices`() {
+        val s = Policy.updateHostnames(
+            state(Device(laptop, access = Access.TRUSTED)),
+            mapOf("AA:BB:CC:00:00:01" to "Macbook", stranger to "Galaxy-S23"),
+        )
+        assertEquals("Macbook", s.device(laptop)!!.displayName)
+        assertNull(s.device(stranger))
+    }
+
+    @Test fun `your own name wins over the reported hostname`() {
+        var s = Policy.rename(state(), laptop, "My laptop")
+        s = Policy.updateHostnames(s, mapOf(laptop to "Macbook"))
+        assertEquals("My laptop", s.device(laptop)!!.displayName)
+        s = Policy.rename(s, laptop, "")
+        assertEquals("Macbook", s.device(laptop)!!.displayName)
+    }
+
+    @Test fun `unchanged hostnames leave the state untouched`() {
+        val s = state(Device(laptop, access = Access.TRUSTED, hostName = "Macbook"))
+        assertTrue(s === Policy.updateHostnames(s, mapOf(laptop to "Macbook")))
+    }
+
     // ---------------------------------------------------------------- seen
 
     @Test fun `markSeen updates known devices only`() {

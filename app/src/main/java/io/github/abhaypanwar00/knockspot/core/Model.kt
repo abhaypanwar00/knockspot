@@ -29,8 +29,12 @@ data class Device(
     val lastKnockAt: Long? = null,
     val lastNotifiedAt: Long? = null,
     val lastSeenAt: Long? = null,
+    /** Name the device reported when it got its IP address (what the phone's Settings shows). */
+    val hostName: String? = null,
 ) {
-    val displayName: String get() = name?.takeIf { it.isNotBlank() } ?: defaultName(mac)
+    /** Your name for the device, else the name it reports, else a short MAC-based label. */
+    val displayName: String
+        get() = name?.takeIf { it.isNotBlank() } ?: hostName?.takeIf { it.isNotBlank() } ?: defaultName(mac)
 
     companion object {
         fun defaultName(mac: String): String = "Device " + mac.takeLast(5).uppercase()
@@ -48,6 +52,11 @@ data class KnockspotState(
      * Null until the first successful sync.
      */
     val lastAppliedBlocked: List<String>? = null,
+    /**
+     * While "Let someone in" is open, allowlist mode is paused so the next new device gets in on
+     * its first try (a turned-away device has to retry by itself). Epoch millis; null when closed.
+     */
+    val doorOpenUntil: Long? = null,
 ) {
     fun device(mac: String): Device? = devices.firstOrNull { it.mac == mac }
 }

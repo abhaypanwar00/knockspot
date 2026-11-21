@@ -17,6 +17,7 @@ object Notifications {
     private const val CHANNEL_GUARD = "guard"
     private const val CHANNEL_KNOCKS = "knocks"
     const val GUARD_ID = 1
+    private const val LIMIT_ID = 2
 
     fun createChannels(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
@@ -33,16 +34,33 @@ object Notifications {
         )
     }
 
-    fun guard(context: Context): Notification =
-        NotificationCompat.Builder(context, CHANNEL_GUARD)
+    /** The ongoing notification. [doorOpenUntil] non-null while "Let someone in" is open. */
+    fun guard(context: Context, doorOpenUntil: Long? = null): Notification {
+        val b = NotificationCompat.Builder(context, CHANNEL_GUARD)
             .setSmallIcon(R.drawable.ic_stat_knockspot)
-            .setContentTitle("Hotspot protection is on")
-            .setContentText("Only trusted devices can join. Others knock.")
             .setOngoing(true)
             .setSilent(true)
+            .setOnlyAlertOnce(true)
             .setContentIntent(openApp(context))
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .build()
+        if (doorOpenUntil != null) {
+            b.setContentTitle("Letting someone in")
+                .setContentText("The next new device to connect joins as a guest")
+                .setWhen(doorOpenUntil).setUsesChronometer(true).setChronometerCountDown(true).setShowWhen(true)
+                .addAction(0, "Close", KnockActionReceiver.intent(context, null, KnockActionReceiver.CLOSE_DOOR))
+        } else {
+            b.setContentTitle("Hotspot protection is on")
+                .setContentText("Only trusted devices can join. Others knock.")
+                .setShowWhen(false)
+                .addAction(0, "Let someone in", KnockActionReceiver.intent(context, null, KnockActionReceiver.OPEN_DOOR))
+        }
+        return b.build()
+    }
+
+    fun updateGuard(context: Context, doorOpenUntil: Long?) {
+        if (!canNotify(context)) return
+        context.getSystemService(NotificationManager::class.java).notify(GUARD_ID, guard(context, doorOpenUntil))
+    }
 
     fun showKnock(context: Context, device: Device) {
         if (!canNotify(context)) return
@@ -50,7 +68,13 @@ object Notifications {
         val n = NotificationCompat.Builder(context, CHANNEL_KNOCKS)
             .setSmallIcon(R.drawable.ic_stat_knockspot)
             .setContentTitle("Knock knock")
-            .setContentText("${device.displayName} wants to join your hotspot")
+            .setContentText("${device.displayName} tried to join your hotspot")
+            .setStyle(
+                NotificationCompat.BigTextStyle().bigText(
+                    "${device.displayName} tried to join your hotspot. If you allow it, it has to connect once " +
+                        "more. Tip: tap “Let someone in” before they connect, and they get in on the first try.",
+                ),
+            )
             .setSubText(device.mac)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -61,6 +85,45 @@ object Notifications {
             .addAction(0, "Block", KnockActionReceiver.intent(context, device.mac, KnockActionReceiver.BLOCK))
             .build()
         context.getSystemService(NotificationManager::class.java).notify(id, n)
+    }
+
+    /** A device came in through "Let someone in". */
+    fun showJoined(context: Context, device: Device) {
+        if (!canNotify(context)) return
+        val n = NotificationCompat.Builder(context, CHANNEL_KNOCKS)
+            .setSmallIcon(R.drawable.ic_stat_knockspot)
+            .setContentTitle("${device.displayName} joined")
+            .setContentText("Guest until the hotspot turns off")
+            .setSubText(device.mac)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .setContentIntent(openApp(context))
+            .addAction(0, "Always allow", KnockActionReceiver.intent(context, device.mac, KnockActionReceiver.ALWAYS))
+            .addAction(0, "Block", KnockActionReceiver.intent(context, device.mac, KnockActionReceiver.BLOCK))
+            .build()
+        context.getSystemService(NotificationManager::class.java).notify(knockId(device.mac), n)
+    }
+
+    /** The hotspot's own device limit turned someone away. */
+    fun showLimitReached(context: Context) {
+        if (!canNotify(context)) return
+        val n = NotificationCompat.Builder(context, CHANNEL_KNOCKS)
+            .setSmallIcon(R.drawable.ic_stat_knockspot)
+            .setContentTitle("Hotspot is full")
+            .setContentText("A device couldn't join: your hotspot's device limit is reached")
+            .setStyle(
+                NotificationCompat.BigTextStyle().bigText(
+                    "A device couldn't join because your hotspot's maximum number of connections is reached. " +
+                        "With Knockspot deciding who gets in, you can raise the limit in your phone's hotspot " +
+                        "settings (Connection management → Maximum connections).",
+                ),
+            )
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setAutoCancel(true)
+            .setContentIntent(openApp(context))
+            .build()
+        context.getSystemService(NotificationManager::class.java).notify(LIMIT_ID, n)
     }
 
     fun cancelKnock(context: Context, mac: String) {

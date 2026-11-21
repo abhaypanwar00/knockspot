@@ -10,6 +10,7 @@ import io.github.abhaypanwar00.knockspot.data.DeviceStore
 import io.github.abhaypanwar00.knockspot.service.GuardService
 import io.github.abhaypanwar00.knockspot.service.Notifications
 import io.github.abhaypanwar00.knockspot.system.HotspotController
+import io.github.abhaypanwar00.knockspot.system.TetheringWatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -30,6 +31,8 @@ data class LiveStatus(
     val shizuku: ShizukuStatus = ShizukuStatus.NOT_RUNNING,
     val hotspotOn: Boolean? = null,
     val connected: List<String> = emptyList(),
+    /** MAC → name each connected device reported (DHCP hostname). */
+    val hostnames: Map<String, String> = emptyMap(),
     val allowlistSupported: Boolean? = null,
     /** Allowlist mode as last read back from the system. */
     val systemAllowlistMode: Boolean? = null,
@@ -45,6 +48,8 @@ class Guard(context: Context) {
     private val app = context.applicationContext
     val store = DeviceStore(app)
     private val controller = HotspotController(app)
+    private val tethering = TetheringWatcher(app)
+    private var lastLimitNoticeAt = 0L
     private val mutex = Mutex()
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -93,6 +98,9 @@ class Guard(context: Context) {
         if (!controller.isConnected) {
             controller.connect()
             controller.listen(listener)
+            // Names are a nice-to-have: never let them break protection.
+            runCatching { tethering.start(::onHostnames) }
+                .onFailure { Log.w(TAG, "Device names unavailable", HotspotController.unwrap(it)) }
         }
         return true
     }
@@ -154,8 +162,26 @@ class Guard(context: Context) {
     }
 
     suspend fun decide(mac: String, decision: Decision) {
-        store.update { Policy.decide(it, mac, decision, System.currentTimeMillis()) }
+        store.update {
+            Policy.updateHostnames(Policy.decide(it, mac, decision, System.currentTimeMillis()), _live.value.hostnames)
+        }
         Notifications.cancelKnock(app, mac)
+        sync()
+    }
+
+    /** "Let someone in": the next new device to connect gets in on its first try, as a guest. */
+    suspend fun openDoor(): Boolean {
+        val state = store.update { Policy.openDoor(it, System.currentTimeMillis()) }
+        if (state.doorOpenUntil == null) return false
+        val ok = sync()
+        if (!ok) store.update(Policy::closeDoor)
+        // The service times the window and keeps the process alive to see who joins.
+        else GuardService.start(app)
+        return ok
+    }
+
+    suspend fun closeDoor() {
+        store.update(Policy::closeDoor)
         sync()
     }
 
@@ -178,12 +204,33 @@ class Guard(context: Context) {
 
         override fun onConnectedClients(macs: List<String>) {
             _live.update { it.copy(connected = macs) }
-            if (macs.isNotEmpty()) scope.launch {
-                store.update { Policy.markSeen(it, macs, System.currentTimeMillis()) }
+            if (macs.isEmpty()) return
+            scope.launch {
+                var admitted: String? = null
+                store.update {
+                    val now = System.currentTimeMillis()
+                    val out = Policy.admitWhileOpen(Policy.markSeen(it, macs, now), macs, now)
+                    admitted = out.admitted
+                    out.state
+                }
+                val mac = admitted ?: return@launch
+                sync() // closes the door: allowlist back on, with the newcomer on it
+                // The device reports its name right after it gets an IP address; give it a moment.
+                delay(3_000)
+                val d = store.update { Policy.updateHostnames(it, _live.value.hostnames) }.device(mac)
+                if (d != null) Notifications.showJoined(app, d)
             }
         }
 
         override fun onKnock(mac: String, reason: HotspotController.KnockReason) {
+            if (reason == HotspotController.KnockReason.LIMIT_REACHED) {
+                val now = System.currentTimeMillis()
+                if (now - lastLimitNoticeAt > LIMIT_NOTICE_COOLDOWN_MS) {
+                    lastLimitNoticeAt = now
+                    Notifications.showLimitReached(app)
+                }
+                return
+            }
             if (reason != HotspotController.KnockReason.NOT_ALLOWED) {
                 Log.i(TAG, "Device $mac turned away: $reason")
                 return
@@ -204,7 +251,13 @@ class Guard(context: Context) {
         }
     }
 
+    private fun onHostnames(names: Map<String, String>) {
+        _live.update { it.copy(hostnames = it.hostnames + names) }
+        scope.launch { store.update { Policy.updateHostnames(it, names) } }
+    }
+
     companion object {
         const val TAG = "Knockspot"
+        private const val LIMIT_NOTICE_COOLDOWN_MS = 5 * 60_000L
     }
 }

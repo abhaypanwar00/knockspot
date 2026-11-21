@@ -12,14 +12,21 @@ object Policy {
     /** A device retrying to connect knocks many times a minute; notify at most once per window. */
     const val KNOCK_NOTIFY_COOLDOWN_MS = 60_000L
 
+    /** How long "Let someone in" stays open if nobody joins. */
+    const val DOOR_WINDOW_MS = 2 * 60_000L
+
     fun normalize(mac: String): String = mac.trim().lowercase()
 
     fun isActiveGuest(d: Device, now: Long): Boolean =
         d.access == Access.GUEST && (d.guestUntil == null || d.guestUntil > now)
 
+    fun isDoorOpen(state: KnockspotState, now: Long): Boolean =
+        state.protectionOn && state.doorOpenUntil != null && state.doorOpenUntil > now
+
     /** What the system hotspot configuration should look like for this state. */
     fun desiredLists(state: KnockspotState, now: Long): SystemLists = SystemLists(
-        allowlistMode = state.protectionOn,
+        // While the door is open the allowlist is paused; the blocklist always applies.
+        allowlistMode = state.protectionOn && !isDoorOpen(state, now),
         allowed = state.devices
             .filter { it.access == Access.TRUSTED || isActiveGuest(it, now) }
             .mapTo(sortedSetOf()) { it.mac },
@@ -72,22 +79,61 @@ object Policy {
         return state.upsert(base.copy(name = name?.trim()?.takeIf { it.isNotEmpty() }))
     }
 
-    /** "Until the hotspot turns off" passes end when the hotspot stops. */
+    /** "Until the hotspot turns off" passes end when the hotspot stops; an open door closes. */
     fun onHotspotStopped(state: KnockspotState): KnockspotState = state.mapDevices {
         if (it.access == Access.GUEST && it.guestUntil == null) it.copy(access = Access.UNDECIDED) else it
+    }.copy(doorOpenUntil = null)
+
+    // ------------------------------------------------------------------ let someone in
+
+    fun openDoor(state: KnockspotState, now: Long, millis: Long = DOOR_WINDOW_MS): KnockspotState =
+        if (!state.protectionOn) state else state.copy(doorOpenUntil = now + millis)
+
+    fun closeDoor(state: KnockspotState): KnockspotState = state.copy(doorOpenUntil = null)
+
+    data class AdmitOutcome(val state: KnockspotState, val admitted: String?)
+
+    /**
+     * While the door is open, the first new device that connects becomes a guest (until the
+     * hotspot turns off) and the door closes. Closing re-enables the allowlist, and the system
+     * then disconnects any other new device that slipped in at the same moment.
+     */
+    fun admitWhileOpen(state: KnockspotState, connected: List<String>, now: Long): AdmitOutcome {
+        if (!isDoorOpen(state, now)) return AdmitOutcome(state, null)
+        val newcomer = connected.map(::normalize).firstOrNull { mac ->
+            val d = state.device(mac)
+            d == null || (d.access != Access.TRUSTED && d.access != Access.BLOCKED && !isActiveGuest(d, now))
+        } ?: return AdmitOutcome(state, null)
+        val base = state.device(newcomer) ?: Device(mac = newcomer)
+        val admitted = state.upsert(base.copy(access = Access.GUEST, guestUntil = null, lastSeenAt = now))
+        return AdmitOutcome(admitted.copy(doorOpenUntil = null), newcomer)
     }
 
-    /** Timed passes end at their deadline. */
+    // ------------------------------------------------------------------ names
+
+    /** Store the names devices report (DHCP hostname) for devices Knockspot knows. */
+    fun updateHostnames(state: KnockspotState, hostnames: Map<String, String>): KnockspotState {
+        if (hostnames.isEmpty()) return state
+        val byMac = hostnames.entries
+            .filter { it.value.isNotBlank() }
+            .associate { normalize(it.key) to it.value.trim() }
+        if (state.devices.none { byMac[it.mac] != null && byMac[it.mac] != it.hostName }) return state
+        return state.mapDevices { d -> byMac[d.mac]?.let { d.copy(hostName = it) } ?: d }
+    }
+
+    /** Timed passes end at their deadline, and an unused open door closes. */
     fun expireGuests(state: KnockspotState, now: Long): KnockspotState = state.mapDevices {
         if (it.access == Access.GUEST && it.guestUntil != null && it.guestUntil <= now) {
             it.copy(access = Access.UNDECIDED, guestUntil = null)
         } else it
-    }
+    }.let { s -> if (s.doorOpenUntil != null && s.doorOpenUntil <= now) s.copy(doorOpenUntil = null) else s }
 
-    /** The next moment a timed guest pass ends, so the app can wake up for it. */
-    fun nextExpiry(state: KnockspotState, now: Long): Long? = state.devices
-        .filter { it.access == Access.GUEST && it.guestUntil != null && it.guestUntil > now }
-        .minOfOrNull { it.guestUntil!! }
+    /** The next moment a timed pass ends or the door closes, so the app can wake up for it. */
+    fun nextExpiry(state: KnockspotState, now: Long): Long? = (
+        state.devices
+            .filter { it.access == Access.GUEST && it.guestUntil != null && it.guestUntil > now }
+            .map { it.guestUntil!! } + listOfNotNull(state.doorOpenUntil?.takeIf { it > now })
+        ).minOrNull()
 
     /**
      * Turning protection on. The first time (no trusted devices yet), whatever is connected
@@ -106,7 +152,8 @@ object Policy {
         return s
     }
 
-    fun disableProtection(state: KnockspotState): KnockspotState = state.copy(protectionOn = false)
+    fun disableProtection(state: KnockspotState): KnockspotState =
+        state.copy(protectionOn = false, doorOpenUntil = null)
 
     /**
      * On the very first sync, adopt whatever allowlist is already configured (by an earlier

@@ -13,6 +13,8 @@ import io.github.abhaypanwar00.knockspot.core.Policy
 import io.github.abhaypanwar00.knockspot.guard
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -27,6 +29,7 @@ import kotlinx.coroutines.launch
 class GuardService : Service() {
 
     private var loop: Job? = null
+    private var doorWatcher: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -35,6 +38,11 @@ class GuardService : Service() {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
         )
         val guard = guard
+        doorWatcher = guard.scope.launch {
+            guard.store.state.map { it.doorOpenUntil }.distinctUntilChanged().collect { until ->
+                Notifications.updateGuard(this@GuardService, until?.takeIf { it > System.currentTimeMillis() })
+            }
+        }
         loop = guard.scope.launch {
             while (isActive) {
                 if (!guard.currentState().protectionOn) {
@@ -54,6 +62,7 @@ class GuardService : Service() {
 
     override fun onDestroy() {
         loop?.cancel()
+        doorWatcher?.cancel()
         super.onDestroy()
     }
 

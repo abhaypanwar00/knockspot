@@ -56,7 +56,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -80,6 +82,7 @@ import io.github.abhaypanwar00.knockspot.core.Device
 import io.github.abhaypanwar00.knockspot.core.KnockspotState
 import io.github.abhaypanwar00.knockspot.core.Policy
 import io.github.abhaypanwar00.knockspot.service.Notifications
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
@@ -141,7 +144,10 @@ fun MainScreen(guard: Guard) {
                     supported = live.allowlistSupported,
                     hotspotOn = live.hotspotOn,
                     error = live.lastError,
+                    doorOpenUntil = state.doorOpenUntil,
                     onToggle = ::toggleProtection,
+                    onOpenDoor = { act { guard.openDoor() } },
+                    onCloseDoor = { act { guard.closeDoor() } },
                 )
             }
 
@@ -163,7 +169,8 @@ fun MainScreen(guard: Guard) {
                 }
             } else {
                 items(live.connected, key = { "c-$it" }) { mac ->
-                    val d = state.device(mac) ?: Device(mac = mac)
+                    val known = state.device(mac) ?: Device(mac = mac)
+                    val d = if (known.hostName == null) known.copy(hostName = live.hostnames[mac]) else known
                     DeviceRow(
                         device = d, now = now, connected = true,
                         onDecide = { act { guard.decide(mac, it) } },
@@ -303,8 +310,22 @@ private fun ProtectionCard(
     supported: Boolean?,
     hotspotOn: Boolean?,
     error: String?,
+    doorOpenUntil: Long?,
     onToggle: (Boolean) -> Unit,
+    onOpenDoor: () -> Unit,
+    onCloseDoor: () -> Unit,
 ) {
+    // Ticks once a second while the door is open, for the countdown.
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(doorOpenUntil) {
+        now = System.currentTimeMillis()
+        while (doorOpenUntil != null && now < doorOpenUntil) {
+            delay(1_000)
+            now = System.currentTimeMillis()
+        }
+    }
+    val doorOpen = on && doorOpenUntil != null && doorOpenUntil > now
+
     val container = if (on) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
     Card(colors = CardDefaults.cardColors(containerColor = container)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -328,9 +349,34 @@ private fun ProtectionCard(
                 Text(if (hotspotOn) "Hotspot is on" else "Hotspot is off — settings apply the next time you turn it on",
                     style = MaterialTheme.typography.labelMedium)
             }
+            if (on) {
+                HorizontalDivider()
+                if (doorOpen) {
+                    val left = ((doorOpenUntil!! - now) / 1000).coerceAtLeast(0)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Letting someone in · %d:%02d".format(left / 60, left % 60),
+                                style = MaterialTheme.typography.titleSmall)
+                            Text("The next new device to connect joins as a guest until the hotspot turns off.",
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        OutlinedButton(onClick = onCloseDoor, enabled = enabled) { Text("Close") }
+                    }
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Someone asking for your hotspot? Tap this first, then they connect once.",
+                            style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                        Spacer(Modifier.width(8.dp))
+                        FilledTonalButton(onClick = onOpenDoor, enabled = enabled && hotspotOn != false) {
+                            Text("Let someone in")
+                        }
+                    }
+                }
+            }
             if (supported == false) {
                 WarningLine("This phone's Wi-Fi hardware does not report allowlist support, so protection may not work.")
-            } else if (on && systemMode == false) {
+            } else if (on && systemMode == false && !doorOpen) {
                 WarningLine("The phone has allowlist mode switched off. Knockspot will switch it back on.")
             }
             if (error != null) WarningLine(error)
