@@ -55,6 +55,17 @@
                 android:value="true" />
         </service>
 
+        <service
+            android:name=".tile.DoorTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_stat_knockspot"
+            android:label="Let someone in"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
         <!-- Lets the Shizuku app hand Knockspot its binder. -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"

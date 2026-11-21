@@ -11,16 +11,21 @@ Knockspot flips the default: **only your trusted devices join automatically.** A
 
 "Allow once" lasts until the hotspot turns off, so there's nothing to undo afterwards.
 
+When someone asks you for the hotspot, tap **Let someone in** first (in the app, on the notification, or as a Quick Settings tile). The next new device that connects gets in on its first try as a guest, and Knockspot tells you who joined.
+
 No root needed. Knockspot uses [Shizuku](https://shizuku.rikka.app/) to reach Android's built-in hotspot allowlist, which phones support but don't show in Settings.
 
 ## Features
 
 - **Allowlist mode** — only trusted devices and active guests can join.
 - **Knock notifications** — unknown devices are blocked and you're asked what to do, with the app closed.
+- **Let someone in** — open a 2-minute window so the next new device connects on the first try, then it closes automatically.
+- **Real device names** — shows the name each device reports, like "Macbook", the same as your phone's hotspot settings.
 - **Guest passes** — allow a device until the hotspot turns off, or for an hour. Passes end on their own.
 - **Two-way sync with your phone's blocklist** — devices you block or unblock in your phone's hotspot settings show up in Knockspot, and the other way round.
 - **Rename devices** — "Rahul's phone" instead of `ca:cf:53:c0:db:d4`.
-- **Quick Settings tile** — switch protection on or off in one tap.
+- **Quick Settings tiles** — switch protection on or off, or let someone in, in one tap.
+- **Device limit notice** — tells you when your hotspot's own connection limit turned someone away.
 - **Keeps working when closed** — the allowlist lives in the system hotspot configuration, so Android enforces it even if Knockspot isn't running. Knockspot also re-applies it if the phone's Settings app switches it off.
 
 ## How it works
@@ -30,7 +35,10 @@ Since Android 11 the hotspot (`SoftApConfiguration`) has an allowlist mode: when
 The shell user (what ADB runs as) holds `NETWORK_SETTINGS`. Shizuku runs a service as that user and lets apps make binder calls through it, so Knockspot can:
 
 1. read and write the hotspot configuration through `IWifiManager` (allowlist mode, allowed list, blocked list), and
-2. register a `SoftApCallback` to receive hotspot state, connected clients and knock events.
+2. register a `SoftApCallback` to receive hotspot state, connected clients and knock events, and
+3. register a `TetheringEventCallback` to read the hostname each client advertised over DHCP.
+
+A turned-away device is disconnected the moment it associates; whether it retries is up to that device. That's why **Let someone in** briefly pauses allowlist mode instead: the newcomer connects normally, becomes a guest, and allowlist mode comes straight back on — at which point Android disconnects any other unknown device that slipped in.
 
 ```
 hotspot event ─▶ HotspotController ─▶ Guard ─▶ Policy (pure Kotlin) ─▶ DeviceStore (DataStore/JSON)
@@ -76,6 +84,8 @@ Requires JDK 17+ and the Android SDK (platform 36).
 
 - Android identifies devices by MAC address. Phones use a randomized MAC per network by default; it stays the same for your hotspot, but if someone resets their phone's network settings, it looks like a new device and knocks again.
 - After a reboot, knocks aren't detected until Shizuku is started again. Protection itself stays on, because the allowlist is stored by the system.
+- A device that was turned away has to connect again after you allow it — Android can't hold it in a waiting state. Use **Let someone in** before they connect to avoid this.
+- While the door is open, the *first* new device to connect gets in. If a roommate's phone auto-joins first, block it from the notification and open the door again.
 - Some phone makers may change how the hotspot behaves. If your phone's own hotspot settings switch the allowlist off, Knockspot switches it back within a minute while it's running.
 
 ## Credits
