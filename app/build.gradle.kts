@@ -32,6 +32,11 @@ android {
     buildFeatures {
         compose = true
     }
+
+    lint {
+        // Library versions are pinned to the newest releases that support compileSdk 36 / AGP 8.13.
+        disable += setOf("GradleDependency", "NewerVersionAvailable", "AndroidGradlePluginVersion")
+    }
 }
 
 kotlin {
@@ -50,7 +55,7 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)
-    implementation(libs.compose.material.icons)
+    implementation(libs.compose.material.icons.core)
     debugImplementation(libs.compose.ui.tooling)
 
     implementation(libs.kotlinx.serialization.json)
