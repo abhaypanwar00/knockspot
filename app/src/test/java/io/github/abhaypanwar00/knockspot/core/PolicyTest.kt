@@ -186,6 +186,22 @@ class PolicyTest {
         assertEquals(s0, Policy.syncFromSystem(s0, listOf(roommate)))
     }
 
+    @Test fun `first sync adopts an allowlist that is already switched on`() {
+        val system = SystemLists(allowlistMode = true, allowed = setOf(laptop), blocked = setOf(stranger))
+        val s = Policy.syncFromSystem(Policy.adoptExisting(state(protection = false), system), system.blocked)
+        assertTrue(s.protectionOn)
+        assertEquals(Access.TRUSTED, s.device(laptop)!!.access)
+        assertEquals(Access.BLOCKED, s.device(stranger)!!.access)
+    }
+
+    @Test fun `later syncs do not re-adopt the system allowlist`() {
+        val synced = Policy.recordApplied(state(protection = false), emptySet())
+        val system = SystemLists(allowlistMode = true, allowed = setOf(roommate), blocked = emptySet())
+        val s = Policy.adoptExisting(synced, system)
+        assertFalse(s.protectionOn)
+        assertNull(s.device(roommate))
+    }
+
     // ---------------------------------------------------------------- seen
 
     @Test fun `markSeen updates known devices only`() {

@@ -109,6 +109,21 @@ object Policy {
     fun disableProtection(state: KnockspotState): KnockspotState = state.copy(protectionOn = false)
 
     /**
+     * On the very first sync, adopt whatever allowlist is already configured (by an earlier
+     * install, another app, or the phone itself) instead of silently switching it off.
+     */
+    fun adoptExisting(state: KnockspotState, system: SystemLists): KnockspotState {
+        if (state.lastAppliedBlocked != null) return state
+        var s = state.copy(protectionOn = state.protectionOn || system.allowlistMode)
+        for (mac in system.allowed.map(::normalize)) {
+            if (mac in system.blocked) continue
+            val d = s.device(mac) ?: Device(mac = mac)
+            if (d.access != Access.BLOCKED) s = s.upsert(d.copy(access = Access.TRUSTED, guestUntil = null))
+        }
+        return s
+    }
+
+    /**
      * Two-way sync with the phone's own blocklist (e.g. OxygenOS Settings → Connection management).
      * Entries the system has gained since our last write were blocked by the user in Settings;
      * entries it has lost were unblocked there. Both are adopted before we write again.
